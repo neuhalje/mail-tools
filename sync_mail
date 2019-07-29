@@ -353,8 +353,9 @@ INBOX_BEFORE=$(notmuch search is:inbox|wc -l)
 
 # afew gets has problems with Maildir being out of sync with notmuch (-> NullPointers)
 # therefore sync before afew
-run "Tagging new messages as new" notmuch new --quiet
-run "Updating afew status before sync .. please standby ..." afew --tag --new
+run "Tagging new messages as new" notmuch new --quiet || die
+run "Compacting notmuch database (again)" notmuch compact || die
+run "Updating afew status before sync .. please standby ..." afew --tag --new || die
 
 run "Syncing with remote" mbsync -a
 
@@ -362,19 +363,19 @@ if [ ! $?  -eq 0 ]; then
    echo Error fetching mail\! Continuing anyway in case of partial success.
 fi
 
-run "Tagging new messages as new" notmuch new
-run "Compacting notmuch DB" notmuch compact
-run "Running afew .. please standby ..." afew --tag --new -v
+run "Tagging new messages as new" notmuch new || die
+run "Compacting notmuch DB" notmuch compact || die
+run "Running afew .. please standby ..." afew --tag --new -v || die
 
 if [ "$move_mails" = "yes" ]; then
-	run "Moving mails" afew --move -v
+	run "Moving mails" afew --move -v || die
 
 	# This is a catch-22 that afew cannot handle - some mails in archive are not 'new'
   # and need to be tagged manually
-	run "Tagging mails in /Archive as archived" notmuch tag +archive -- folder:/Archive/
+	run "Tagging mails in /Archive as archived" notmuch tag +archive -- folder:/Archive/ || die
 
 	# Propagate back
-        run "Uploading moved mails to remote" mbsync -a
+        run "Uploading moved mails to remote" mbsync -a || die
 fi
 
 INBOX_AFTER=$(notmuch search is:inbox|wc -l)
