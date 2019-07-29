@@ -1,0 +1,386 @@
+#!/bin/bash
+#
+# Sync emails with mbsync, afew and notmuch. The main advantage is that
+# it automatically checks (xapian-check) and backups the notmuch DB.
+#
+# $0 assumes that all new important messages are tagged with 'inbox' and
+# shows a notification if the number of 'inbox' messages has been changed
+# by the script.
+#
+# Some of the features:
+#
+# * the user is notified on linux and macos when new messages arrived
+# * only runs when the mailserver is reachable (configurable checks, e.g. for
+#   IMAP servers)
+# * checks & backups the notmuch database before each run (and clean
+#   up old backups)
+# * runs afew
+# * and syncs the changes back up
+#
+# Example:
+#
+#    $sync_mail
+#    Mail sync started on Tue Jun 25 20:06:24 CEST 2019. Moving mails: no
+#    checking online state                                  ✓
+#    Integrity checking notmuch DB                          ✓
+#    Backing up notmuch DB                                  ✓
+#    Cleaning up old notmuch DB backups                     ✓
+#    Tagging new messages as new                            ✓
+#    Updating afew status before sync .. please standby ... ✓
+#    Syncing with remote                                    ✓
+#    Tagging new messages as new                            ✓
+#    Compacting notmuch DB                                  ✓
+#    Running afew .. please standby ...                     ✓
+#    No new mail
+
+export PATH=~/bin:/bin:/usr/bin:/usr/local/bin/
+
+# MAILDIR is only used to find the xapian dir
+# It is the same dir as configured in `.notmuch-config`
+#
+# [database]
+# path=/home/myuser/Mail
+MAILDIR=${MAILDIR:-$HOME/Mail}
+
+LOGFILE=~/.sync_mail.log
+
+# Before sync a backup of the notmuch db is created
+# in this folder.
+#
+# To recover from a broken database:
+#  * rm -rfi  $NOTMUCH_XAPIAN_DIR
+#  * notmuch new
+#  * notmuch restore --input="${NOTMUCH_BACKUP}/latest.gz"
+NOTMUCH_BACKUP=${NOTMUCH_BACKUP:-$HOME/backups/notmuch_backup}
+
+# How many days of retention for notmuch backups? Backups older than this will
+# be deleted.
+NOTMUCH_BACKUP_RETENTION=${NOTMUCH_BACKUP_RETENTION:-21}
+
+# Used for checking the consistency of the database.
+# Normally you will never touch this but configure $MAILDIR
+NOTMUCH_XAPIAN_DIR="${MAILDIR}/.notmuch/xapian"
+
+# If set then this command will be executed to validate online state.
+# If the exit code is 0, then sync is continued, else aborted.
+#
+# The following examples are provided:
+#
+# check_online_smtp HOST [PORT:25]    <- timeout ± 2s
+# check_online_imap HOST [PORT:143]   <- timeout ± 2s
+# check_online_smtps HOST [PORT:465]  <- timeout by openssl
+# check_online_imaps HOST [PORT:993]  <- timeout by openssl
+CHECK_ONLINE_CMD=${CHECK_ONLINE_CMD:"check_online_smtp aspmx.l.google.com 25"}
+
+#### --- implementation --------
+
+help_restoring() {
+	cat <<-EOF-MARKER
+
+ERROR
+------
+
+An error has been found while checking your notmuch database.
+
+Sometimes the notmuch database breaks. This is not caused by this script, but there is help.
+
+The following commands will delete the notmuch database and restore the latest backup.
+
+Run them at your own risk!
+
+Most of the time compacting the database works:
+
+	notmuch compact
+
+If this does not work out, then a backup must be restored.
+
+	mkdir notmuch-before-rescue
+	notmuch dump > notmuch-before-rescue/export-of-broken-notmuch.dump
+	tar cfz notmuch-before-rescue/xapian.tgz "${NOTMUCH_XAPIAN_DIR}"
+
+	rm -rfi  "${NOTMUCH_XAPIAN_DIR}"
+	notmuch new
+	notmuch restore --input="${NOTMUCH_BACKUP}/latest.gz"
+	EOF-MARKER
+
+	die
+}
+
+log() {
+  local headline="$1"
+  local detail="$2"
+  local timestamp=$(date +"%Y-%m-%d %H-%M-%S")
+  printf "%s %-15s| %s\n" "$timestamp" "$headline" "$detail" >> "${LOGFILE}"
+}
+
+# The script needs some tools. In order to be upfront, we will check the
+# existence of the tools before running
+__NEEDED_TOOLS=(afew       # used for tagging
+                notmuch    # used for indexing mails
+                mbsync     # used to sync the mailboxes
+                openssl    # only used for testing online state with TLS/SSL
+                nc         # only used for testing online state with plaintext
+                xapian-check # test the notmuch DB for errors
+                gpgme-tool # not called directly but for some reasons gpgme is
+                           # needed by "notmuch dump"
+                )
+
+_assert_tool() {
+  local tool="$1"
+  local tool_path="$(which $tool)"
+  if [[ (! -z "$tool_path") && -x "$tool_path" ]]; then
+    log "$tool" "Found at '$tool_path'"
+    return 0
+  else
+    error "Missing tool" "'$tool' is needed to run this script!"
+    return 1
+  fi
+}
+
+check_needed_tools() {
+  for tool in ${__NEEDED_TOOLS[@]}; do
+      _assert_tool "$tool" || return 1
+  done
+  return 0
+}
+
+# call "afew --move" after syncing?
+if [ "$1" = "--move" ]; then
+  move_mails=yes
+else
+  move_mails=no
+fi
+
+check_online_smtp()
+{
+  local HOST="$1"
+  local PORT=${2:-25}
+  nc -w 1 "${HOST}" ${PORT}< <(echo quit)
+}
+
+check_online_imap()
+{
+  local HOST="$1"
+  local PORT=${2:-143}
+  nc -w 1 "${HOST}" ${PORT}< <(echo 000 logout)
+}
+
+check_online_smtps()
+{
+  local HOST="$1"
+  local PORT=${2:-465}
+  openssl  s_client -quiet  -connect ${HOST}:${PORT} < <(echo quit)
+}
+
+check_online_imaps()
+{
+  local HOST="$1"
+  local PORT=${2:-993}
+  openssl  s_client -quiet  -connect ${HOST}:${PORT} < <(echo 000 logout)
+}
+
+check_online()
+{
+  if [ -z "${CHECK_ONLINE_CMD}" ]; then
+    echo "skipped online check"
+    return 0
+  else
+    ${CHECK_ONLINE_CMD} > /dev/null
+    return $?
+  fi
+}
+
+check_notmuch_db()
+{
+  msg=$(xapian-check "${NOTMUCH_XAPIAN_DIR}" 2>&1)
+  let err=$?
+  if [ $err -ne 0 ]; then
+    error "Check notmuch db failed" "Failed to check notmuch db: Error code: $err  $msg"
+    return $err
+  fi
+  return 0
+}
+
+#
+# Backup the notmuch db into the $NOTMUCH_BACKUP directory.
+#
+backup_notmuch()
+{
+  if [ ! -d "${NOTMUCH_BACKUP}" ]; then
+    error "The target directory for backups does not exist.
+Please create the directory and retry.
+NOTMUCH_BACKUP=\"${NOTMUCH_BACKUP}\""
+    return 2
+  fi
+
+  timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+  backup="${NOTMUCH_BACKUP}/notmuch-dump-${timestamp}.gz"
+  msg=$(notmuch dump --gzip --output="$backup" 2>&1)
+  let err=$?
+
+  if [ $err -ne 0 ]; then
+    error "Backup failed" \
+      "Failed to backup notmuch to $backup: Error code: $err  $msg"
+    return $err
+  fi
+
+  msg=$(ln -s -f "$backup" "${NOTMUCH_BACKUP}/latest.gz")
+  let err=$?
+  if [ $err -ne 0 ]; then
+    error "Backup failed" \
+      "Failed to link backup $backup to ${NOTMUCH_BACKUP}/latest.gz : Error code: $err  $msg"
+    return $err
+  fi
+  return 0
+}
+
+# A history of $NOTMUCH_BACKUP_RETENTION days of notmuch DB backups is kept.
+# This function cleans up backups that are to old.
+remove_old_backups()
+{
+  find "${NOTMUCH_BACKUP}" -type f \
+                           -name 'notmuch-dump-????-??-??_??-??-??*.gz' \
+                           -ctime +${NOTMUCH_BACKUP_RETENTION:-14} \
+                           -delete
+}
+
+die() {
+ exit 1
+}
+
+error() {
+  local headline="$1"
+  local detail="$2"
+  echo "$headline"
+  echo "$detail"
+  log "$headline" "$detail"
+  notify "$headline" "$detail"
+}
+
+info() {
+  local headline="$1"
+  local detail="$2"
+  log "$headline" "$detail"
+  notify "$headline" "$detail"
+}
+
+#
+# Notify the user via a notification channel (popup,..).
+#
+# Parameters:
+#  $1: headlinne (short string, e.g. "Sync failed")
+#  $2: detail text (longer text)
+#
+# Supported OS:
+#  * Linux (notify-send)
+#  * MacOS (terminal-notifier, osascript)
+#
+notify() {
+  local headline="$1"
+  local detail="$2"
+  if [[ -x $(which notify-send) ]]; then
+       # Linux/Ubuntu
+       # http://manpages.ubuntu.com/manpages/xenial/man1/notify-send.1.html
+       notify-send  --urgency=normal "$headline" "$detail"
+    elif [[ -x $(which terminal-notifier) ]]; then
+       # MacOS, pretty
+       # https://github.com/julienXX/terminal-notifier
+       terminal-notifier -title Mail -subtitle "$headline" -message "$detail"
+     elif [[ -x $(which osascript) ]]; then
+       # MacOS
+       #   https://apple.stackexchange.com/questions/57412/how-can-i-trigger-a-notification-center-notification-from-an-applescript-or-shel
+       osascript -e "display notification \"$detail\" with title \"$headline\""
+    else
+      echo $headline
+      echo $detail
+    fi
+}
+
+# Runs a command and prints a message. 
+# The exit code of the command will be returned.
+#
+# In case of errors the commands output is shown.
+#
+# Usage:
+#  run "message to display" command [arg 1] [...] [arg n]
+#
+# Example:
+#
+#  run "checking online state" check_online
+#
+run()
+{
+ local RED=`tput setaf 1`
+ local GREEN=`tput setaf 2`
+ local NC=`tput sgr0`
+ local msg="$1"
+
+ log "Running" "$msg"
+
+ printf "%-75s" "$msg"
+
+ shift
+ # Execute the command with the parameters
+ out=$($* 2>&1)
+ result=$?
+
+ if [ $result = 0 ]; then
+   echo "${GREEN}✓${NC}"
+   return 0
+ else
+  echo "${RED}✗${NC}"
+  echo "${RED}${out}${NC}"
+  log "Error ${result}" "${out}"
+  return $result
+ fi
+}
+
+echo "Mail sync started on $(date). Moving mails: $move_mails"
+log "Starting" "Mail sync started on $(date). Moving mails: $move_mails"
+
+run "checking needed tools" check_needed_tools ||die
+run "checking online state" check_online ||die
+
+run "Integrity checking notmuch DB" check_notmuch_db ||  help_restoring #;  die
+run "Backing up notmuch DB" backup_notmuch ||  die
+run "Cleaning up old notmuch DB backups" remove_old_backups
+run "Compacting notmuch database" notmuch compact
+
+INBOX_BEFORE=$(notmuch search is:inbox|wc -l)
+
+# afew gets has problems with Maildir being out of sync with notmuch (-> NullPointers)
+# therefore sync before afew
+run "Tagging new messages as new" notmuch new --quiet
+run "Updating afew status before sync .. please standby ..." afew --tag --new
+
+run "Syncing with remote" mbsync -a
+
+if [ ! $?  -eq 0 ]; then
+   echo Error fetching mail\! Continuing anyway in case of partial success.
+fi
+
+run "Tagging new messages as new" notmuch new
+run "Compacting notmuch DB" notmuch compact
+run "Running afew .. please standby ..." afew --tag --new -v
+
+if [ "$move_mails" = "yes" ]; then
+	run "Moving mails" afew --move -v
+
+	# This is a catch-22 that afew cannot handle - some mails in archive are not 'new'
+  # and need to be tagged manually
+	run "Tagging mails in /Archive as archived" notmuch tag +archive -- folder:/Archive/
+
+	# Propagate back
+        run "Uploading moved mails to remote" mbsync -a
+fi
+
+INBOX_AFTER=$(notmuch search is:inbox|wc -l)
+
+INBOX_DELTA=$(($INBOX_AFTER  - $INBOX_BEFORE ))
+
+if [ $INBOX_DELTA -eq 0 ]; then
+   # info "No Mail" "No new mail  (Inbox before: $INBOX_BEFORE, after $INBOX_AFTER)"
+   echo No new mail
+else
+  info "New Mail" "$INBOX_DELTA new messages (Inbox before: $INBOX_BEFORE, after $INBOX_AFTER)"
+fi
