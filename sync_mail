@@ -341,10 +341,13 @@ log "Starting" "Mail sync started on $(date). Moving mails: $move_mails"
 run "checking needed tools" check_needed_tools ||die
 run "checking online state" check_online ||die
 
+# notmuchs xapian DB gets corrupted by looking at it the wrong way
+# Compacting the DB (at times) fixes these corruptions.
+# http://notmuch.198994.n3.nabble.com/Database-corruption-after-clean-rebuild-td4039336.html
+run "Compacting notmuch database" notmuch compact
 run "Integrity checking notmuch DB" check_notmuch_db ||  help_restoring #;  die
 run "Backing up notmuch DB" backup_notmuch ||  die
 run "Cleaning up old notmuch DB backups" remove_old_backups
-run "Compacting notmuch database" notmuch compact
 
 INBOX_BEFORE=$(notmuch search is:inbox|wc -l)
 
