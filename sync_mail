@@ -381,7 +381,10 @@ if [ ! $?  -eq 0 ]; then
 fi
 
 run "Tagging new messages as new" notmuch new || die
-run "Compacting notmuch DB" notmuch compact || die
+if [ -z ${skip_notmuch_compact} ]; then
+  # if this fails WE broke the DB - quit right now
+  run "Compacting notmuch database (again)" notmuch compact || die
+fi
 run "Running afew .. please standby ..." afew --tag --new -v || die
 
 if [ "$move_mails" = "yes" ]; then
