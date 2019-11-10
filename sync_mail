@@ -144,13 +144,6 @@ check_needed_tools() {
   return 0
 }
 
-# call "afew --move" after syncing?
-if [ "$1" = "--move" ]; then
-  move_mails=yes
-else
-  move_mails=no
-fi
-
 check_online_smtp()
 {
   local HOST="$1"
@@ -335,8 +328,26 @@ run()
  fi
 }
 
-echo "Mail sync started on $(date). Moving mails: $move_mails"
-log "Starting" "Mail sync started on $(date). Moving mails: $move_mails"
+# call "afew --move" after syncing?
+if [ "$1" = "--move" ]; then
+  move_mails=yes
+else
+  move_mails=no
+fi
+
+if [[ $(uname -r) == *Microsoft* ]]; then
+  # notmuch compact fails on (my) WSL with permission denied
+  # when creating the backup dir.
+  log "Windows detected" "Skipping 'notmuch compact' and db integrity check"
+  skip_notmuch_compact=true
+  skip_xapian_check=true
+else
+  log "non-Windows OS detected" "Compacting DB via 'notmuch compact'"
+  unset skip_notmuch_compact
+  unset skip_xapian_check
+fi
+
+info "Starting" "Mail sync started on $(date). Moving mails: $move_mails"
 
 run "checking needed tools" check_needed_tools ||die
 run "checking online state" check_online ||die
@@ -344,8 +355,11 @@ run "checking online state" check_online ||die
 # notmuchs xapian DB gets corrupted by looking at it the wrong way
 # Compacting the DB (at times) fixes these corruptions.
 # http://notmuch.198994.n3.nabble.com/Database-corruption-after-clean-rebuild-td4039336.html
-run "Compacting notmuch database" notmuch compact
-run "Integrity checking notmuch DB" check_notmuch_db ||  help_restoring #;  die
+[ -z ${skip_notmuch_compact} ] && run "Compacting notmuch database" notmuch compact
+if [ -z ${skip_xapian_check} ]; then
+  run "Integrity checking notmuch DB" check_notmuch_db ||  help_restoring #;  die
+fi
+
 run "Backing up notmuch DB" backup_notmuch ||  die
 run "Cleaning up old notmuch DB backups" remove_old_backups
 
@@ -354,7 +368,10 @@ INBOX_BEFORE=$(notmuch search is:inbox|wc -l)
 # afew gets has problems with Maildir being out of sync with notmuch (-> NullPointers)
 # therefore sync before afew
 run "Tagging new messages as new" notmuch new --quiet || die
-run "Compacting notmuch database (again)" notmuch compact || die
+if [ -z ${skip_notmuch_compact} ]; then
+  # if this fails WE broke the DB - quit right now
+  run "Compacting notmuch database (again)" notmuch compact || die
+fi
 run "Updating afew status before sync .. please standby ..." afew --tag --new || die
 
 run "Syncing with remote" mbsync -a
