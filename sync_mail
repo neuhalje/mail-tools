@@ -72,6 +72,9 @@ NOTMUCH_XAPIAN_DIR="${MAILDIR}/.notmuch/xapian"
 # check_online_imaps HOST [PORT:993]  <- timeout by openssl
 CHECK_ONLINE_CMD=${CHECK_ONLINE_CMD:"check_online_smtp aspmx.l.google.com 25"}
 
+# Move deleted messages into this directory
+NOTMUCH_DELETED=${NOTMUCH_DELETED:-${HOME}/backups/deleted_mails}
+
 #### --- implementation --------
 
 help_restoring() {
@@ -231,10 +234,32 @@ NOTMUCH_BACKUP=\"${NOTMUCH_BACKUP}\""
 # This function cleans up backups that are to old.
 remove_old_backups()
 {
+  if [ ! -d "${NOTMUCH_BACKUP}" ]; then
+    error "The target directory for backups does not exist.
+Please create the directory and retry.
+NOTMUCH_BACKUP=\"${NOTMUCH_BACKUP}\""
+    return 2
+  fi
   find "${NOTMUCH_BACKUP}" -type f \
                            -name 'notmuch-dump-????-??-??_??-??-??*.gz' \
                            -ctime +${NOTMUCH_BACKUP_RETENTION:-14} \
                            -delete
+}
+
+archive_deleted_mails()
+{
+  if [ ! -d "${NOTMUCH_DELETED}" ]; then
+    error "The target directory for moving deleted files does not exist.
+Please create the directory and retry.
+NOTMUCH_DELETED=\"${NOTMUCH_DELETED}\""
+    return 2
+  fi
+
+  while read f
+  do
+    mv -v "${f}" "${NOTMUCH_DELETED}"
+  done < <(notmuch search --output=files --exclude=false tag:deleted)
+ 
 }
 
 die() {
@@ -328,12 +353,28 @@ run()
  fi
 }
 
-# call "afew --move" after syncing?
-if [ "$1" = "--move" ]; then
-  move_mails=yes
-else
-  move_mails=no
-fi
+
+move_mails=no
+delete_mails=no
+while [[ $# -gt 0 ]]
+do
+key="$1"
+
+case $key in
+    -m|--move)
+    move_mails=yes
+    shift
+    ;;
+    -d|--delete)
+    delete_mails=yes
+    shift
+    ;;
+    *)    # unknown option
+    error "Unknown option ${key}"||die
+    shift # past argument
+    ;;
+esac
+done
 
 if [[ $(uname -r) == *Microsoft* ]]; then
   # notmuch compact fails on (my) WSL with permission denied
@@ -347,7 +388,7 @@ else
   unset skip_xapian_check
 fi
 
-info "Starting" "Mail sync started on $(date). Moving mails: $move_mails"
+info "Starting" "Mail sync started on $(date). Moving mails: ${move_mails}. Deleting mails: ${delete_mails}."
 
 run "checking needed tools" check_needed_tools ||die
 run "checking online state" check_online ||die
@@ -387,7 +428,12 @@ if [ -z ${skip_notmuch_compact} ]; then
 fi
 run "Running afew .. please standby ..." afew --tag --new -v || die
 
-if [ "$move_mails" = "yes" ]; then
+if [ "${delete_mails}" = "yes" ]; then
+	run "Deleting mails marked as deleted" archive_deleted_mails  || die
+    run "Updating notmuch DB with removed messages" notmuch new --quiet || die
+fi
+
+if [ "${move_mails}" = "yes" ]; then
 	run "Moving mails" afew --move -v || die
 
 	# This is a catch-22 that afew cannot handle - some mails in archive are not 'new'
