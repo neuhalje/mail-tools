@@ -111,9 +111,10 @@ If this does not work out, then a backup must be restored.
 
 log() {
   local headline="$1"
-  local detail="$2"
+  shift
+  local detail="$*"
   local timestamp=$(date +"%Y-%m-%d %H-%M-%S")
-  printf "%s %-15s| %s\n" "$timestamp" "$headline" "$detail" >> "${LOGFILE}"
+  printf "%s %-25s| %s\n" "$timestamp" "$headline" "$detail" >> "${LOGFILE}"
 }
 
 # The script needs some tools. In order to be upfront, we will check the
@@ -178,7 +179,7 @@ check_online_imaps()
 check_online()
 {
   if [ -z "${CHECK_ONLINE_CMD}" ]; then
-    echo "skipped online check"
+    log "check online" "skipped online check"
     return 0
   else
     ${CHECK_ONLINE_CMD} > /dev/null
@@ -227,6 +228,8 @@ NOTMUCH_BACKUP=\"${NOTMUCH_BACKUP}\""
       "Failed to link backup $backup to ${NOTMUCH_BACKUP}/latest.gz : Error code: $err  $msg"
     return $err
   fi
+
+  log "backup_notmuch"  $(find "${NOTMUCH_BACKUP}" -type f -name "notmuch-dump-*.gz" | wc -l) " backups."
   return 0
 }
 
@@ -240,6 +243,11 @@ Please create the directory and retry.
 NOTMUCH_BACKUP=\"${NOTMUCH_BACKUP}\""
     return 2
   fi
+
+  log "remove_old_backups"  "Deleting " $(find "${NOTMUCH_BACKUP}" -type f \
+                           -name 'notmuch-dump-????-??-??_??-??-??*.gz' \
+			   -ctime +${NOTMUCH_BACKUP_RETENTION:-14} | wc -l) " backups"
+
   find "${NOTMUCH_BACKUP}" -type f \
                            -name 'notmuch-dump-????-??-??_??-??-??*.gz' \
                            -ctime +${NOTMUCH_BACKUP_RETENTION:-14} \
@@ -314,6 +322,8 @@ notify() {
     fi
 }
 
+
+
 # Runs a command and prints a message. 
 # The exit code of the command will be returned.
 #
@@ -335,19 +345,18 @@ run()
 
  log "Running" "$msg"
 
- printf "%-75s" "$msg"
-
+ printf "%-55s" "$msg"
  shift
+
  # Execute the command with the parameters
  out=$($* 2>&1)
  result=$?
 
  if [ $result = 0 ]; then
-   echo "${GREEN}✓${NC}"
+   printf "${NC}%-13s ${GREEN}✓${NC}\n" ""
    return 0
  else
-  echo "${RED}✗${NC}"
-  echo "${RED}${out}${NC}"
+  printf "${NC}exit code %-3s ${RED}✗${NC}\n" "${result}"
   log "Error ${result}" "${out}"
   return $result
  fi
@@ -391,6 +400,7 @@ fi
 info "Starting" "Mail sync started on $(date). Moving mails: ${move_mails}. Deleting mails: ${delete_mails}."
 
 run "checking needed tools" check_needed_tools ||die
+
 run "checking online state" check_online ||die
 
 # notmuchs xapian DB gets corrupted by looking at it the wrong way
