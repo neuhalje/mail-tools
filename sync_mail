@@ -73,7 +73,10 @@ NOTMUCH_XAPIAN_DIR="${MAILDIR}/.notmuch/xapian"
 CHECK_ONLINE_CMD=${CHECK_ONLINE_CMD:"check_online_smtp aspmx.l.google.com 25"}
 
 # Move deleted messages into this directory
-NOTMUCH_DELETED=${NOTMUCH_DELETED:-${HOME}/backups/deleted_mails}
+NOTMUCH_DELETED_DIR=${NOTMUCH_DELETED_DIR:-${HOME}/backups/deleted_mails}
+
+# Keep deleted mails in NOTMUCH_DELETED_DIR for NOTMUCH_DELETED_RETENTION_DAYS
+NOTMUCH_DELETED_RETENTION_DAYS=${NOTMUCH_DELETED_RETENTION_DAYS:-60}
 
 #### --- implementation --------
 
@@ -256,18 +259,30 @@ NOTMUCH_BACKUP=\"${NOTMUCH_BACKUP}\""
 
 archive_deleted_mails()
 {
-  if [ ! -d "${NOTMUCH_DELETED}" ]; then
+  if [ ! -d "${NOTMUCH_DELETED_DIR}" ]; then
     error "The target directory for moving deleted files does not exist.
 Please create the directory and retry.
-NOTMUCH_DELETED=\"${NOTMUCH_DELETED}\""
+NOTMUCH_DELETED_DIR=\"${NOTMUCH_DELETED_DIR}\""
     return 2
   fi
 
   while read f
   do
-    mv -v "${f}" "${NOTMUCH_DELETED}"
+    mv -v "${f}" "${NOTMUCH_DELETED_DIR}"
   done < <(notmuch search --output=files --exclude=false tag:deleted)
- 
+}
+
+cleanup_deleted_mails()
+{
+  if [ -z "${NOTMUCH_DELETED_RETENTION_DAYS##*[!0-9]*}" ]; then
+    error "The retention time for deleted mails in NOTMUCH_DELETED_DIR
+is not a positive integer (\"${NOTMUCH_DELETED_RETENTION_DAYS}\")."
+    return 2
+  fi
+
+  find "${NOTMUCH_DELETED_DIR}" -type f \
+                                -ctime +${NOTMUCH_DELETED_RETENTION_DAYS} \
+                                -delete
 }
 
 die() {
@@ -440,7 +455,8 @@ run "Running afew .. please standby ..." afew --tag --new -v || die
 
 if [ "${delete_mails}" = "yes" ]; then
 	run "Deleting mails marked as deleted" archive_deleted_mails  || die
-    run "Updating notmuch DB with removed messages" notmuch new --quiet || die
+  run "Updating notmuch DB with removed messages" notmuch new --quiet || die
+  run "Cleaning up trash" cleanup_deleted_mails || die
 fi
 
 if [ "${move_mails}" = "yes" ]; then
