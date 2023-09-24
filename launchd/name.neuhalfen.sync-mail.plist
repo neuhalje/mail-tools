@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <!--
+  Copy to ~/Library/LaunchAgents/ then
+     launchctl unload ~/Library/LaunchAgents/name.neuhalfen.sync-mail.plist
+
+     launchctl load ~/Library/LaunchAgents/name.neuhalfen.sync-mail.plist
+
+     launchctl start name.neuhalfen.sync-mail
+
+      -->
+  <dict>
+    <key>Label</key>
+    <string>name.neuhalfen.sync-mail</string>
+    <!--
+        ServiceDescription seems to be unsupported but I will keep it here
+        to boldly state what nobody wants to see: what this does
+    -->
+    <key>ServiceDescription</key>
+    <string>Sync Mail</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>Program</key>
+    <string>/Users/jens/bin/sync_mail</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>-m</string>
+      <string>-d</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>30</integer>
+    <!-- Do not run more often than every X seconds -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+  </dict>
+</plist>
