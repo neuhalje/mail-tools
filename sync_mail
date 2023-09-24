@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Sync emails with mbsync, afew and notmuch. The main advantage is that
 # it automatically checks (xapian-check) and backups the notmuch DB.
@@ -33,7 +33,7 @@
 #    Running afew .. please standby ...                     ✓
 #    No new mail
 
-export PATH=~/bin:/bin:/usr/bin:/usr/local/bin/
+export PATH=~/bin:/bin:/usr/bin:/usr/local/bin/:/opt/homebrew/bin/
 
 # MAILDIR is only used to find the xapian dir
 # It is the same dir as configured in `.notmuch-config`
@@ -326,7 +326,7 @@ notify() {
     elif [[ -x $(which terminal-notifier) ]]; then
        # MacOS, pretty
        # https://github.com/julienXX/terminal-notifier
-       terminal-notifier -title Mail -subtitle "$headline" -message "$detail"
+       terminal-notifier -title Mail -subtitle "${headline:-Sync Mail}" -message "${detail:-./.}"
      elif [[ -x $(which osascript) ]]; then
        # MacOS
        #   https://apple.stackexchange.com/questions/57412/how-can-i-trigger-a-notification-center-notification-from-an-applescript-or-shel
@@ -457,6 +457,8 @@ if [ "${delete_mails}" = "yes" ]; then
 	run "Deleting mails marked as deleted" archive_deleted_mails  || die
   run "Updating notmuch DB with removed messages" notmuch new --quiet || die
   run "Cleaning up trash" cleanup_deleted_mails || die
+  # Expunge
+  run "Expunge mailboxes" mbsync -X -a || die
 fi
 
 if [ "${move_mails}" = "yes" ]; then
